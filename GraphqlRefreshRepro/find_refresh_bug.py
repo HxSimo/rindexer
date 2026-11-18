@@ -113,6 +113,7 @@ def kill(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
+<<<<<<< HEAD
 def wait_for_relation(port: int, timeout: float = 5.0) -> bool:
     deadline = time.monotonic() + timeout
     while True:
@@ -124,6 +125,8 @@ def wait_for_relation(port: int, timeout: float = 5.0) -> bool:
         time.sleep(0.2)
 
 
+=======
+>>>>>>> 00cd680c3da5b25ff2b176071775bfc544da37a2
 def approval_fields(port: int) -> list[str] | None:
     body = json.dumps({"query": '{ __type(name: "Approval") { fields { name } } }'}).encode()
     request = urllib.request.Request(
@@ -221,6 +224,7 @@ def main() -> None:
         if port_box[0] is None:
             sys.exit("GraphQL port was not announced")
 
+<<<<<<< HEAD
         print("waiting for the schema to expose transferByValue", flush=True)
         has_relation = wait_for_relation(port_box[0])
         events["T5"] = time.monotonic()
@@ -229,6 +233,17 @@ def main() -> None:
             print("transferByValue=False", flush=True)
             sys.exit("the schema did not refresh after LISTEN")
         print("transferByValue=True", flush=True)
+=======
+        events["T5"] = time.monotonic()
+        fields = approval_fields(port_box[0])
+        if fields is None:
+            sys.exit(f"graphql on {port_box[0]} did not answer")
+        has_relation = "transferByValue" in fields
+        print_order(events, port_box[0], has_relation)
+        if has_relation:
+            sys.exit("transferByValue=True; the schema saw the foreign key")
+        print("transferByValue=False", flush=True)
+>>>>>>> 00cd680c3da5b25ff2b176071775bfc544da37a2
     finally:
         kill(process)
         subprocess.run(

@@ -327,7 +327,9 @@ pub async fn start_rindexer(details: StartDetails<'_>) -> Result<(), StartRindex
                         match crate::indexer::start::initialize_database(&manifest_clone).await {
                             Ok(Some(client)) => Some(client),
                             Ok(None) => {
-                                error!("PostgreSQL is enabled but no database client was created for health server");
+                                error!(
+                                    "PostgreSQL is enabled but no database client was created for health server"
+                                );
                                 None
                             }
                             Err(e) => {
@@ -355,7 +357,9 @@ pub async fn start_rindexer(details: StartDetails<'_>) -> Result<(), StartRindex
             };
 
             if graphql_server_handle.is_none() && details.graphql_details.enabled {
-                error!("GraphQL can not run without postgres storage enabled, you have tried to run GraphQL which will now be skipped.");
+                error!(
+                    "GraphQL can not run without postgres storage enabled, you have tried to run GraphQL which will now be skipped."
+                );
             }
 
             if let Some(mut indexing_details) = details.indexing_details {
@@ -434,7 +438,9 @@ pub async fn start_rindexer(details: StartDetails<'_>) -> Result<(), StartRindex
                 if !relationships.is_empty() {
                     // TODO if graphql isn't up yet, and we apply this on graphql wont refresh we
                     // need to handle this
-                    info!("Applying constraints relationships back to the database as historic resync is complete");
+                    info!(
+                        "Applying constraints relationships back to the database as historic resync is complete"
+                    );
 
                     Relationship::apply_all(&relationships).await?;
                 }
@@ -476,7 +482,9 @@ pub async fn start_rindexer(details: StartDetails<'_>) -> Result<(), StartRindex
                         dependencies =
                             ContractEventDependencies::map_from_relationships(&relationships)?;
                     } else {
-                        info!("Manual dependency_events found, skipping auto-applying the dependency_events with the relationships");
+                        info!(
+                            "Manual dependency_events found, skipping auto-applying the dependency_events with the relationships"
+                        );
                     }
 
                     start_live_indexing(
