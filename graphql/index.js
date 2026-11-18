@@ -59,7 +59,7 @@ let appendPlugins = [byteaToHex, PgSimplifyInflectorPlugin];
 if (!disableAdvancedFilters) {
     appendPlugins.push(ConnectionFilterPlugin);
 }
-
+// Repro barrier gates LISTEN via public.rindexer_repro_barrier.
 const options = {
     watchPg: true,
     host: "localhost",
