@@ -257,6 +257,7 @@ impl Relationship {
 
         client.execute(self.apply_foreign_key_construct_sql().as_str(), &[]).await?;
 
+        info!("rindexer repro: T4 foreign key committed");
         info!(
             "Applied foreign key for relationship after historic resync complete: table - {} constraint - {}",
             self.db_table_name,

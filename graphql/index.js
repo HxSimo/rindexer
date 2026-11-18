@@ -55,7 +55,23 @@ const byteaToHex = makeWrapResolversPlugin(
         },
 );
 
-let appendPlugins = [byteaToHex, PgSimplifyInflectorPlugin];
+function refreshSchemaOnWatchStart(builder, { pgConfig }) {
+    let refreshInterval;
+
+    builder.registerWatcher(() => {
+        // The first schema may be built before LISTEN is active. Request a
+        // refresh until a second schema confirms the watcher received it.
+        builder.once("schema", () => {
+            refreshInterval = setInterval(() => {
+                pgConfig.query("select pg_notify('postgraphile_watch', $1)", ['{"type":"manual"}'])
+                    .catch(error => console.error("Failed to request initial GraphQL schema refresh:", error));
+            }, 750);
+            builder.once("schema", () => clearInterval(refreshInterval));
+        });
+    }, () => clearInterval(refreshInterval));
+}
+
+let appendPlugins = [byteaToHex, PgSimplifyInflectorPlugin, refreshSchemaOnWatchStart];
 if (!disableAdvancedFilters) {
     appendPlugins.push(ConnectionFilterPlugin);
 }

@@ -2,7 +2,7 @@
 use crate::api::{start_graphql_server, stop_graphql_server, StartGraphqlServerError};
 #[cfg(feature = "postgres")]
 use crate::database::postgres::{
-    client::PostgresConnectionError,
+    client::{PostgresClient, PostgresConnectionError},
     indexes::{ApplyPostgresIndexesError, PostgresIndexResult},
     relationship::{ApplyAllRelationships, Relationship},
     setup::{setup_postgres, SetupPostgresError},
@@ -122,6 +122,35 @@ pub enum StartRindexerError {
 
     #[error("Reth CLI error: {0}")]
     RethCliError(#[from] Box<dyn std::error::Error>),
+}
+
+/// Test-only. When `public.rindexer_repro_barrier` exists and `release_apply`
+/// is false, constraint application waits. A normal start finds no table.
+#[cfg(feature = "postgres")]
+async fn wait_for_repro_barrier(column: &str) {
+    let Ok(client) = PostgresClient::new().await else {
+        return;
+    };
+    let Ok(row) = client
+        .query_one("SELECT to_regclass('public.rindexer_repro_barrier') IS NOT NULL", &[])
+        .await
+    else {
+        return;
+    };
+    if !row.get::<_, bool>(0) {
+        return;
+    }
+    info!("rindexer repro: waiting for barrier {column}");
+    let query = format!("SELECT {column} FROM public.rindexer_repro_barrier WHERE id = 1");
+    loop {
+        match client.query_one(query.as_str(), &[]).await {
+            Ok(row) if row.get::<_, bool>(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    info!("rindexer repro: barrier {column} released");
 }
 
 async fn handle_shutdown(signal: &str) {
@@ -395,6 +424,9 @@ pub async fn start_rindexer(details: StartDetails<'_>) -> Result<(), StartRindex
                 }
 
                 // TODO if graphql isn't up yet, and we apply this on graphql wont refresh we need to handle this
+                #[cfg(feature = "postgres")]
+                wait_for_repro_barrier("release_apply").await;
+
                 #[cfg(feature = "postgres")]
                 PostgresIndexResult::apply_indexes(postgres_indexes).await?;
 

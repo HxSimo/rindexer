@@ -4,6 +4,85 @@ Guidance for coding agents (and humans) contributing to this repo. Every command
 path in this file is taken from the repo's actual CI workflows, Makefiles, and source —
 follow it exactly rather than guessing.
 
+## Agent priorities — simplicity, scope, and validation
+
+These rules apply to **every task**, including small fixes and refactors. Keep the
+repository-specific compatibility, security, test, and release requirements below;
+these guidelines control **how much code to change and which checks to run locally**.
+
+### Simplicity and maintainability
+
+- Prefer the **smallest, clearest correct solution**. Follow KISS and YAGNI; apply DRY
+  only when duplication is real and removing it makes the code easier to understand.
+- Do not introduce helpers, wrappers, traits, configuration, new modules, or dependency
+  layers solely for hypothetical future use. Reuse established repository patterns.
+- **For a simplification/refactor, aim to remove code and reduce cognitive load.**
+  If the change adds substantially more lines, abstractions, or moving parts than it
+  removes, reconsider the design before implementing it. More lines are justified
+  only by a concrete correctness, safety, or compatibility requirement; explain why.
+- Avoid speculative error handling, broad fallback behavior, unrelated cleanup, and
+  defensive code without a demonstrated risk. Do not weaken necessary validation,
+  security checks, or error handling merely to reduce the line count.
+- Prefer straightforward local edits over generalized redesigns. Preserve existing
+  behavior, public APIs, and user-visible contracts unless the task explicitly says
+  otherwise.
+
+### Strict scope control
+
+- Change only what the request requires, plus directly necessary tests, documentation,
+  and changelog updates under the rules below.
+- Do not refactor neighboring code, rename unrelated symbols, add dependencies, or
+  rewrite tests outside the affected behavior just because improvements are possible.
+- Inspect the relevant code and existing patterns first; avoid broad repository scans
+  when the affected files and symbols are already known.
+- For an ambiguous implementation choice, prefer the smallest viable change rather
+  than silently enlarging the task.
+
+### Third-party dependencies — never patch installed code
+
+- **Never manually edit, overwrite, or delete files inside `node_modules/`**, or
+  equivalent installed dependency directories and package-manager caches (for
+  example, `vendor/` when it contains third-party code, `.pnpm/`, or `target/`
+  dependency build outputs). Treat these files as external, disposable artifacts,
+  not as application source code.
+- **Do not create or introduce patches that modify installed third-party packages**:
+  no `patch-package` patches, `pnpm patchedDependencies`, custom `.patch` files,
+  `postinstall` scripts that rewrite dependencies, or equivalent workarounds.
+  Do not silently use another mechanism to achieve the same effect.
+- If a dependency appears to require a change, first look for a fix in **our own
+  source code, configuration, supported public APIs, or an officially released
+  dependency version**. Do not upgrade, downgrade, or add dependencies without a
+  concrete need arising from the task.
+- If the task cannot be completed without modifying a third-party dependency,
+  **stop and explain the blocker and available alternatives**; ask for explicit
+  direction instead of patching it yourself.
+- Normal package-manager installation/build operations may populate dependency
+  directories; this is **not permission to hand-edit their contents**. Avoid
+  unrelated lockfile or dependency-version changes. Existing repository-owned
+  generated files follow their dedicated rules elsewhere in this document.
+
+### Validation budget — targeted checks by default
+
+- **Do not automatically run the entire repository/workspace test suite, all-features
+  builds, full workspace Clippy, or full E2E harness for an isolated change.** The
+  CI command list below documents PR gates, not what must run after every edit.
+- Start with the narrowest meaningful validation: changed-file formatting, a relevant
+  crate check, a specific unit test, or a named integration test. For Rust tests use
+  a filtered `cargo nextest run -p <crate> <filter>` or
+  `cargo nextest run -p <crate> --test <test_target>` where appropriate.
+- Expand checks only if the change crosses components, affects feature flags or
+  generated artifacts, a focused test fails, or there is a concrete regression risk.
+  Select the affected components and features first, not the whole workspace.
+- Run full CI-equivalent checks only when explicitly requested (including explicit
+  full PR/release validation), or when the change truly has repository-wide impact.
+  Do not interpret an ordinary code change as permission for full CI runs. For
+  expensive checks, explain the reason before running them.
+- Do not add redundant tests that merely mirror implementation details. Add or update
+  tests to cover changed behavior and realistic regressions; keep feature/bug-fix
+  expectations from this repository intact.
+- In the final summary, state what changed, **which checks were actually run**, what
+  was not run (including full-suite checks), and why. Never claim unrun checks passed.
+
 rindexer is an open-source, high-speed EVM indexing toolset written in Rust, compatible
 with any EVM chain. Users index chain events either with a single `rindexer.yaml` file
 ("no-code" mode) or by generating a typed Rust project ("rust" mode), and get storage
@@ -165,8 +244,10 @@ Release profiles in `core/Cargo.toml` and `cli/Cargo.toml` use `lto = "fat"` +
 `reth`-gated code does not compile in a default build, and `kafka`-gated code does not
 compile when building core alone (`cargo build -p rindexer`) — a default **workspace**
 build does enable `kafka`, via the CLI's default feature and cargo feature unification.
-If you touch code near `#[cfg(feature = …)]`, verify with `--all-features` (CI does;
-see below). Windows release binaries are built **without** `reth`.
+If you change `#[cfg(feature = …)]`-gated behavior, verify the affected feature
+combination first. CI runs `--all-features`; run it locally only if broader feature
+interaction warrants it or full validation is requested. Windows release binaries
+are built **without** `reth`.
 
 ### Runtime env vars & logging
 
@@ -180,9 +261,12 @@ see below). Windows release binaries are built **without** `reth`.
   (the e2e Makefile targets set it per target; `RUST_BACKTRACE='full'` used in
   `cli/Makefile` run targets).
 
-## Required checks — mirror CI before you're done
+## CI checks — reference commands, not mandatory for every local edit
 
-CI (`.github/workflows/ci.yml`) gates every PR with exactly these; run them locally:
+CI (`.github/workflows/ci.yml`) gates PRs with the commands below. **Do not run
+all of them automatically after a small change.** Use focused checks during normal
+development; reserve the full set for explicit requests, final PR validation, or
+changes with genuine workspace-wide risk:
 
 ```bash
 cargo fmt --all -- --check
@@ -197,7 +281,7 @@ cargo nextest run --exclude rindexer_rust_playground --workspace --all-features
   Install once with `cargo install cargo-nextest --locked`.
 - Formatting rules are in `rustfmt.toml` (`use_small_heuristics = "Max"` — aggressive
   single-line packing; `reorder_imports`; `use_field_init_shorthand`). Run `cargo fmt`
-  and let it decide; don't fight it.
+  for the relevant crate/files and let it decide; avoid unrelated formatting changes.
 - The `--all-features` test run compiles `reth` + `kafka` and is substantially heavier.
 - Coverage job: `cargo llvm-cov nextest -p rindexer -p rindexer_cli --all-features`
   (uploaded to Codecov, `fail_ci_if_error: true`).
@@ -424,10 +508,16 @@ section on the release branch.
 
 ## Pre-submit checklist
 
-1. `cargo fmt --all -- --check` passes.
-2. `cargo clippy --workspace --all-targets -- -D warnings` passes.
-3. `cargo nextest run --exclude rindexer_rust_playground --workspace` passes
-   (and `--all-features` if you touched `kafka`/`reth`-gated or feature-adjacent code).
+The following are **PR/CI expectations, not an instruction for Codex to run every
+command after every change**. During ordinary development, prefer the focused checks
+specified under "Validation budget". Report checks left to CI instead of claiming
+that they passed locally.
+
+1. CI verifies `cargo fmt --all -- --check`; locally format/check relevant files or crates.
+2. CI verifies `cargo clippy --workspace --all-targets -- -D warnings`; locally check only affected crates/targets as needed.
+3. CI verifies `cargo nextest run --exclude rindexer_rust_playground --workspace`
+   (and the `--all-features` variant). Locally run tests for affected behavior first;
+   broaden for `kafka`/`reth` feature interactions when justified.
 4. Changelog entry added to the top unreleased section of
    `documentation/docs/pages/docs/changelog.mdx` (or the change genuinely has zero
    user-visible effect).
