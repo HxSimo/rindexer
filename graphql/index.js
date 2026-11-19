@@ -1,10 +1,15 @@
-const express = require('express')
-const cors = require('cors')
+const { createServer } = require("node:http");
+const express = require("express");
+const cors = require("cors");
 const { postgraphile } = require("postgraphile");
-const { makeWrapResolversPlugin } = require("graphile-utils");
-const PgSimplifyInflectorPlugin = require("@graphile-contrib/pg-simplify-inflector");
-const ConnectionFilterPlugin = require("postgraphile-plugin-connection-filter");
-const { PgNodeAliasPostGraphile } = require("graphile-build-pg");
+const { LIST_TYPES, TYPES, listOfCodec } = require("postgraphile/@dataplan/pg");
+const { makePgService } = require("postgraphile/adaptors/pg");
+const { access, constant, defaultPlanResolver, lambda, SafeError } = require("postgraphile/grafast");
+const { grafserv } = require("postgraphile/grafserv/express/v4");
+const { PostGraphileAmberPreset } = require("postgraphile/presets/amber");
+const { makeV4Preset } = require("postgraphile/presets/v4");
+const { PgSimplifyInflectionPreset } = require("@graphile/simplify-inflection");
+const { PostGraphileConnectionFilterPreset } = require("postgraphile-plugin-connection-filter");
 
 const args = process.argv.slice(2);
 
@@ -14,77 +19,134 @@ if (args.length < 5) {
 }
 
 const connectionString = args[0];
-const schemas = args[1].split(",");
-const port = parseInt(args[2]);
-let graphqlPageLimit = parseInt(args[3]);
-let graphqlTimeout = parseInt(args[4]);
-let filterOnlyOnIndexedColumns = args[5] === "true";
-let disableAdvancedFilters = args[6] === "true";
-let skipNodeAliasPlugin = args[7] === "true";
+const schemas = args[1] === "" ? [] : args[1].split(",");
+const port = Number(args[2]);
+const pageLimit = Number(args[3]);
+const statementTimeout = args[4];
+const filterOnlyOnIndexedColumns = args[5] === "true";
+const disableAdvancedFilters = args[6] === "true";
+const skipNodeAliasPlugin = args[7] === "true";
 
-const byteaToHex = makeWrapResolversPlugin(
-    (context) => {
-        return context;
-    },
-    ({ scope }) =>
-        async (resolver, user, args, context, _resolveInfo) => {
-            if (typeof args === "object") {
-                const first = args['first'];
-                const last = args['last'];
-
-                const firstValue = first ? parseInt(first) : 0;
-                const lastValue = last ? parseInt(last) : 0;
-
-                if (firstValue > graphqlPageLimit || lastValue > graphqlPageLimit) {
-                    throw new Error(`Pagination limit exceeded. Maximum allowed is ${graphqlPageLimit}.`)
-                }
-            }
-
-            // always add a limit on the amount you can bring back if last is defined
-            // then let the resolver handle it as limits has been handled above already
-            if (args['last'] === undefined) {
-                args['first'] = args['first'] ? args['first'] : graphqlPageLimit;
-            }
-
-            let result = await resolver();
-            if (result && typeof result === "string") {
-                // it is a bytea need to turn back to a hex
-                result = result.startsWith('\\x') ? result.replace('\\x', '0x') : result;
-            }
-            return result;
-        },
-);
-
-let appendPlugins = [byteaToHex, PgSimplifyInflectorPlugin];
-if (!disableAdvancedFilters) {
-    appendPlugins.push(ConnectionFilterPlugin);
+function checkPageSizes([first, last]) {
+    if (first > pageLimit || last > pageLimit) {
+        throw new SafeError(`Pagination limit exceeded. Maximum allowed is ${pageLimit}.`);
+    }
+    return [last === undefined ? first || pageLimit : first, last];
 }
 
-const options = {
-    watchPg: true,
-    host: "localhost",
-    disableDefaultMutations: true,
-    dynamicJson: true,
-    cors: true,
-    retryOnInitFail: true,
-    enableQueryBatching: true,
-    sortExport: true,
-    ignoreIndexes: !filterOnlyOnIndexedColumns,
-    enhanceGraphiql: false,
-    graphiql: false,
-    disableQueryLog: true,
-    pgSettings: {
-        statement_timeout: graphqlTimeout,
+const pageLimitPlugin = {
+    name: "RindexerPageLimitPlugin",
+    after: ["PgFirstLastBeforeAfterArgsPlugin"],
+    schema: {
+        hooks: {
+            GraphQLObjectType_fields_field_args(args, _build, { scope }) {
+                if (!args.first || !(scope.isPgFieldConnection || scope.isPgFieldSimpleCollection)) {
+                    return args;
+                }
+                // Apply the two page sizes together so that a backward request can omit first.
+                return {
+                    ...args,
+                    first: { ...args.first, applyPlan: undefined },
+                    ...(args.last && { last: { ...args.last, applyPlan: undefined } }),
+                };
+            },
+            GraphQLObjectType_fields_field(field, _build, { scope }) {
+                if (!field.plan || !(scope.isPgFieldConnection || scope.isPgFieldSimpleCollection)) {
+                    return field;
+                }
+                const plan = field.plan;
+                return {
+                    ...field,
+                    plan($parent, args, info) {
+                        const $collection = plan($parent, args, info);
+                        if ($collection && args.$first) {
+                            const $sizes = lambda([args.$first, args.$last ?? constant(undefined)], checkPageSizes);
+                            $collection.addValidation?.(() => $sizes);
+                            $collection.setFirst(access($sizes, [0]));
+                            if (args.$last) {
+                                $collection.setLast(access($sizes, [1]));
+                            }
+                        }
+                        return $collection;
+                    },
+                };
+            },
+        },
     },
-    simpleCollections: 'omit',
-    appendPlugins,
-    // Only skip PgNodeAliasPostGraphile when there are table name conflicts across schemas
-    // This avoids node alias conflicts but changes nodeId format
-    ...(skipNodeAliasPlugin ? { skipPlugins: [PgNodeAliasPostGraphile] } : {}),
-    graphileBuildOptions: {
+};
+
+// Keep bytea as GraphQL String and retain PostgreSQL's hex strings inside arrays.
+const byteaCodec = {
+    ...TYPES.bytea,
+    fromPg: (value) => value,
+    toPg: (value) => value,
+};
+const byteaArrayCodec = listOfCodec(byteaCodec);
+
+const byteaPlugin = {
+    name: "RindexerByteaPlugin",
+    after: ["PgCodecsPlugin"],
+    gather: {
+        hooks: {
+            pgCodecs_findPgCodec(_info, event) {
+                if (event.pgCodec === TYPES.bytea) {
+                    event.pgCodec = byteaCodec;
+                } else if (event.pgCodec === LIST_TYPES.bytea) {
+                    event.pgCodec = byteaArrayCodec;
+                }
+            },
+        },
+    },
+    schema: {
+        hooks: {
+            init: {
+                before: ["PgCodecs"],
+                callback(input, build) {
+                    build.setGraphQLTypeForPgCodec(byteaCodec, ["input", "output"], "String");
+                    return input;
+                },
+            },
+            GraphQLObjectType_fields_field(field, _build, { scope }) {
+                if (scope.pgFieldAttribute?.codec !== byteaCodec) {
+                    return field;
+                }
+                const plan = field.plan ?? defaultPlanResolver;
+                return {
+                    ...field,
+                    plan($parent, args, info) {
+                        return lambda(plan($parent, args, info), (value) =>
+                            value?.startsWith("\\x") ? `0x${value.slice(2)}` : value, true);
+                    },
+                };
+            },
+        },
+    },
+};
+
+const preset = {
+    extends: [
+        PostGraphileAmberPreset,
+        makeV4Preset({
+            watchPg: true,
+            disableDefaultMutations: true,
+            dynamicJson: true,
+            retryOnInitFail: true,
+            sortExport: true,
+            ignoreIndexes: !filterOnlyOnIndexedColumns,
+            graphiql: false,
+            simpleCollections: "omit",
+            pgSettings: { statement_timeout: statementTimeout },
+        }),
+        PgSimplifyInflectionPreset,
+        ...(disableAdvancedFilters ? [] : [PostGraphileConnectionFilterPreset]),
+    ],
+    pgServices: [makePgService({ connectionString, schemas })],
+    plugins: [pageLimitPlugin, byteaPlugin],
+    schema: {
         pgOmitListSuffix: false,
         pgSimplifyAllRows: false,
         pgShortPk: false,
+        pgV4UseTableNameForNodeIdentifier: !skipNodeAliasPlugin,
         connectionFilterAllowedOperators: [
             "isNull",
             "equalTo",
@@ -101,8 +163,6 @@ const options = {
     },
 };
 
-
-
 const htmlContent = `
     <div style="width: 100%; height: 100%;" id='embedded-sandbox'></div>
     <script src="https://embeddable-sandbox.cdn.apollographql.com/_latest/embeddable-sandbox.umd.production.min.js"></script>
@@ -114,18 +174,25 @@ const htmlContent = `
     </script>
 `;
 
-const app = express()
-app.use(cors())
-app.use(express.json())
-app.use(postgraphile(connectionString, schemas, options))
+async function main() {
+    const app = express();
+    app.use(cors());
+    app.use(express.json());
+    app.get("/playground", (_req, res) => {
+        res.send(htmlContent);
+    });
 
-app.get('/playground', (req, res) => {
-    res.send(htmlContent);
-});
+    const server = createServer(app);
+    const pgl = postgraphile(preset);
+    const serv = pgl.createServ(grafserv);
+    await serv.addTo(app, server);
+    server.listen(port, "0.0.0.0", () => {
+        console.log(`GraphQL endpoint: http://localhost:${port}/graphql`);
+        console.log(`GraphiQL Playground endpoint: http://localhost:${port}/playground`);
+    });
+}
 
-app.listen(port, "0.0.0.0", () => {
-    console.log(`GraphQL endpoint: http://localhost:${port}/graphql`);
-    console.log(
-        `GraphiQL Playground endpoint: http://localhost:${port}/playground`
-    );
+main().catch((error) => {
+    console.error(error);
+    process.exit(1);
 });

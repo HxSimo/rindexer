@@ -4,23 +4,23 @@
   "main": "index.js",
   "bin": "index.js",
   "scripts": {
-    "build": "pkg ."
+    "build": "esbuild index.js --bundle --platform=node --target=node22 --external:ruru --outfile=node_modules/.cache/rindexer-graphql.cjs && pkg node_modules/.cache/rindexer-graphql.cjs --no-bytecode --public"
   },
   "dependencies": {
-    "@graphile-contrib/pg-simplify-inflector": "^6.1.0",
+    "@graphile/simplify-inflection": "9.0.1",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "graphile-utils": "^4.13.0",
     "knex": "^3.1.0",
     "knex-migrate": "^1.7.4",
     "pg": "^8.12.0",
-    "postgraphile": "^4.13.0",
-    "postgraphile-plugin-connection-filter": "^2.3.0"
+    "postgraphile": "5.2.1",
+    "postgraphile-plugin-connection-filter": "3.0.1"
   },
   "devDependencies": {
+    "@yao-pkg/pkg": "^6.6.0",
     "dotenv": "^16.4.5",
-    "nodemon": "^3.1.4",
-    "@yao-pkg/pkg": "^6.6.0"
+    "esbuild": "0.27.7",
+    "nodemon": "^3.1.4"
   }
 }

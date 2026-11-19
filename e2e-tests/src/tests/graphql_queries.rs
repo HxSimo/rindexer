@@ -103,6 +103,13 @@ fn graphql_data_accuracy_test(
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
         let client = reqwest::Client::new();
+        let playground_url = reqwest::Url::parse(&gql_url)?.join("/playground")?;
+        let playground =
+            client.get(playground_url).send().await?.error_for_status()?.text().await?;
+        anyhow::ensure!(
+            playground.contains("EmbeddedSandbox"),
+            "Expected Apollo Sandbox on the GraphQL server's /playground route"
+        );
 
         // Discover the transfer query field via introspection
         let transfer_field = discover_transfer_field(&client, &gql_url).await?;
@@ -158,6 +165,26 @@ fn graphql_data_accuracy_test(
             ));
         }
         info!("GraphQL returned {} items", result_items.len());
+
+        let pagination_query = format!(
+            "{{ page: {transfer_field}(first: 1) {{ nodes {{ rindexerId }} }} overLimit: {transfer_field}(last: 1001) {{ totalCount }} }}"
+        );
+        let pagination: serde_json::Value = client
+            .post(&gql_url)
+            .json(&serde_json::json!({ "query": pagination_query }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        anyhow::ensure!(
+            pagination["data"]["page"]["nodes"].as_array().is_some_and(|nodes| nodes.len() == 1)
+                && pagination["data"].get("overLimit").is_some_and(serde_json::Value::is_null)
+                && pagination["errors"][0]["message"]
+                    == "Pagination limit exceeded. Maximum allowed is 1000."
+                && pagination["errors"][0]["path"][0] == "overLimit",
+            "Unexpected GraphQL pagination response: {pagination}"
+        );
 
         // Validate transfer rows (skip mint — first row with from=0x0)
         let transfer_items: Vec<_> = result_items
